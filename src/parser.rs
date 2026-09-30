@@ -117,9 +117,7 @@ fn transform_create_document(file_name: &str, blocks: &DocumentBlocks, transform
     if supplier_name.is_empty() || sample_name.is_empty() {
         return Err("委托书缺少委托单位或样品名称".to_owned());
     }
-    let items = blocks.tables.get(5).map(|table| {
-        table.iter().flat_map(|row| row.iter()).map(|cell| cell.trim()).filter(|cell| !cell.is_empty()).map(str::to_owned).collect::<Vec<_>>()
-    }).unwrap_or_default();
+    let items = selected_table_items(blocks.tables.get(5));
     let hardware = table_objects(blocks.tables.get(1), &["workshop", "workerName", "samplingName"]);
     let software = table_objects(blocks.tables.get(2), &["workshop", "jobName"]);
     let supporting = table_objects(blocks.tables.get(3), &["workshop", "jobName"]);
@@ -129,7 +127,7 @@ fn transform_create_document(file_name: &str, blocks: &DocumentBlocks, transform
         "operation": "create",
         "document_name": file_name,
         "acceptWay": 1,
-        "rq": value("检测类型"),
+        "rq": selected_checkbox_value(&value("检测类型")),
         "supplierName": supplier_name,
         "mailAddress": value("委托单位地址"),
         "inspectionName": value("制造单位"),
@@ -140,16 +138,16 @@ fn transform_create_document(file_name: &str, blocks: &DocumentBlocks, transform
         "ra": sample_name,
         "rb": value("规格型号"),
         "rc": value("样品数量").parse::<u64>().unwrap_or(0),
-        "rd": value("测试分类"),
+        "rd": selected_checkbox_value(&value("测试分类")),
         "testBackground": value("检测原因"),
         "re": value("方法标准"),
         "rf": value("判定依据"),
-        "rg": value("保密要求"),
-        "rh": value("报告格式"),
-        "sampleHandling": value("检毕样品处置"),
-        "ri": value("结 果交 付"),
-        "rj": value("评审结论"),
-        "rl": value("来样检查"),
+        "rg": selected_checkbox_value(&value("保密要求")),
+        "rh": selected_checkbox_value(&value("报告格式")),
+        "sampleHandling": selected_checkbox_value(&value("检毕样品处置")),
+        "ri": selected_checkbox_value(&value("结 果交 付")),
+        "rj": selected_checkbox_value(&value("评审结论")),
+        "rl": selected_checkbox_value(&value("来样检查")),
         "remark": value("备注"),
         "itemList": items,
         "HardwareVersion": hardware,
@@ -187,7 +185,7 @@ fn transform_change_document(file_name: &str, blocks: &DocumentBlocks, transform
         "TestingsSoftware": table_objects(blocks.tables.get(1), &["workshop", "jobName"]),
         "SupportingTests": table_objects(blocks.tables.get(2), &["workshop", "jobName"]),
         "MatchingLCD": table_objects(blocks.tables.get(3), &["workshop", "jobName"]),
-        "itemList": blocks.tables.get(4).map(|table| table.iter().flat_map(|row| row.iter()).filter(|v| !v.trim().is_empty()).cloned().collect::<Vec<_>>()).unwrap_or_default(),
+        "itemList": selected_table_items(blocks.tables.get(4)),
         "content_text": text
     }))
 }
@@ -198,6 +196,83 @@ fn find_labeled_value(rows: &[Vec<String>], label: &str) -> Option<String> {
             row.get(index + 1).cloned().filter(|value| !value.trim().is_empty()).or_else(|| rows.get(row_index + 1).and_then(|next| next.get(index)).cloned())
         } else { None }
     }))
+}
+
+fn selected_checkbox_value(value: &str) -> String {
+    let normalized = value
+        .replace("□√", "☑")
+        .replace("□✓", "☑")
+        .replace("□✔", "☑")
+        .replace("☐√", "☑")
+        .replace("☐✓", "☑")
+        .replace("☐✔", "☑")
+        .replace("▢√", "☑")
+        .replace("▢✓", "☑")
+        .replace("▢✔", "☑")
+        .replace("□×", "☐")
+        .replace("☐×", "☐")
+        .replace("▢×", "☐");
+    let chars: Vec<char> = normalized.chars().collect();
+    let marker_positions: Vec<(usize, char)> = chars
+        .iter()
+        .enumerate()
+        .filter_map(|(index, character)| is_checkbox_marker(*character).then_some((index, *character)))
+        .collect();
+    if marker_positions.is_empty() {
+        return normalize_text(value);
+    }
+
+    let mut options: Vec<(bool, String)> = Vec::new();
+    for (marker_index, (position, marker)) in marker_positions.iter().enumerate() {
+        let mut start = position + 1;
+        let mut selected = is_checked_marker(*marker);
+        while start < chars.len() && is_checkbox_marker(chars[start]) {
+            if is_checked_marker(chars[start]) {
+                selected = true;
+            }
+            start += 1;
+        }
+        let end = marker_positions.get(marker_index + 1).map(|(next, _)| *next).unwrap_or(chars.len());
+        let text = normalize_text(&chars[start..end].iter().collect::<String>());
+        options.push((selected, text));
+    }
+
+    // Some Word files insert the check mark after the option text, for example
+    // `□检测方处理√□委托方领回`. In that form the checked marker has no text;
+    // associate it with the preceding option.
+    for index in 1..options.len() {
+        if options[index].1.is_empty() && is_checked_marker(marker_positions[index].1) {
+            options[index - 1].0 = true;
+        }
+    }
+
+    options
+        .into_iter()
+        .filter(|(selected, text)| *selected && !text.is_empty())
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>()
+        .join("、")
+}
+
+fn selected_table_items(table: Option<&Vec<Vec<String>>>) -> Vec<String> {
+    let Some(table) = table else { return Vec::new(); };
+    let has_selection_marker = table.iter().flatten().any(|cell| cell.chars().any(is_checkbox_marker));
+    if !has_selection_marker {
+        return table.iter().flat_map(|row| row.iter()).map(|cell| cell.trim()).filter(|cell| !cell.is_empty()).map(str::to_owned).collect();
+    }
+    table.iter().map(|row| selected_checkbox_value(&row.join(" "))).filter(|item| !item.is_empty()).collect()
+}
+
+fn normalize_text(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn is_checkbox_marker(character: char) -> bool {
+    matches!(character, '□' | '☐' | '▢' | '☑' | '☒' | '■' | '√' | '✓' | '✔' | '×')
+}
+
+fn is_checked_marker(character: char) -> bool {
+    matches!(character, '☑' | '☒' | '■' | '√' | '✓' | '✔')
 }
 
 fn table_objects(table: Option<&Vec<Vec<String>>>, keys: &[&str]) -> Vec<Value> {
@@ -330,6 +405,17 @@ fn parse_document_blocks(xml: &str) -> DocumentBlocks {
                     }
                 }
             }
+            Ok(Event::Empty(event)) => {
+                if local_name(event.name().as_ref()) == "sym" {
+                    if let Some(marker) = symbol_marker(&event) {
+                        if in_table && in_cell {
+                            cell_text.push(marker);
+                        } else {
+                            paragraph_text.push(marker);
+                        }
+                    }
+                }
+            }
             Ok(Event::End(event)) => match local_name(event.name().as_ref()).as_str() {
                 "p" => {
                     let text = paragraph_text.trim();
@@ -375,6 +461,18 @@ fn local_name(name: &[u8]) -> String {
     raw.rsplit(':').next().unwrap_or(raw).to_owned()
 }
 
+fn symbol_marker(event: &quick_xml::events::BytesStart<'_>) -> Option<char> {
+    let code = event.attributes().flatten().find_map(|attribute| {
+        (local_name(attribute.key.as_ref()) == "char").then(|| String::from_utf8_lossy(attribute.value.as_ref()).into_owned())
+    })?;
+    match u32::from_str_radix(code.trim(), 16).ok()? {
+        0x52 => Some('☑'),
+        0x53 => Some('☐'),
+        0xA3 => Some('□'),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,5 +500,15 @@ mod tests {
         assert_eq!(value["operation"], "create");
         assert_eq!(value["supplierName"], "科林");
         assert_eq!(value["rc"], 2);
+    }
+
+    #[test]
+    fn selected_checkbox_value_returns_only_checked_options() {
+        assert_eq!(selected_checkbox_value("□检测方处理□委托方领回"), "");
+        assert_eq!(selected_checkbox_value("√检测方处理□委托方领回"), "检测方处理");
+        assert_eq!(selected_checkbox_value("□√检测方处理□委托方领回"), "检测方处理");
+        assert_eq!(selected_checkbox_value("□检测方处理□√委托方领回"), "委托方领回");
+        assert_eq!(selected_checkbox_value("☐检测方处理☒委托方领回"), "委托方领回");
+        assert_eq!(selected_checkbox_value("普通文本"), "普通文本");
     }
 }
